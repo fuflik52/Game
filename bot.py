@@ -573,16 +573,58 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.close()
     await update.message.reply_text(profile_text)
 
+async def test_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Создаем сессию
+        session = Session()
+        
+        # Пробуем создать тестового пользователя
+        test_user = User(
+            user_id=update.effective_user.id,
+            username=update.effective_user.username or "Unknown",
+            balance=5000.0
+        )
+        
+        # Добавляем пользователя в базу
+        session.add(test_user)
+        session.commit()
+        
+        # Проверяем, что пользователь создался
+        user = session.query(User).filter_by(user_id=update.effective_user.id).first()
+        
+        if user:
+            await update.message.reply_text(
+                f"✅ База данных работает!\n\n"
+                f"Создан тестовый пользователь:\n"
+                f"ID: {user.user_id}\n"
+                f"Имя: {user.username}\n"
+                f"Баланс: {user.balance}"
+            )
+        else:
+            await update.message.reply_text("❌ Ошибка: Не удалось найти созданного пользователя")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при работе с базой данных: {str(e)}")
+    finally:
+        session.close()
+
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # Добавляем обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_callback))
-
-    # Запускаем бота
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    application = ApplicationBuilder().token(TOKEN).build()
+    
+    # Добавляем обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("games", show_games_menu))
+    application.add_handler(CommandHandler("profile", show_profile))
+    application.add_handler(CommandHandler("help", blackjack_help))
+    application.add_handler(CommandHandler("test_db", test_db))  # Добавляем новый обработчик
+    
+    # Добавляем обработчик кнопок
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Добавляем обработчик текстовых сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
