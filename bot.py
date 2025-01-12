@@ -14,8 +14,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Подключение к базе данных
+# Константы
+ADMIN_ID = 1449276772
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = 'postgresql://postgres:jUGJtRdVtAkahZBRBZMlpIICrkDfuuhq@junction.proxy.rlwy.net:19226/railway'
+
+# Подключение к базе данных
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -43,6 +47,17 @@ class GameLog(Base):
     result = Column(String)
     profit = Column(Float)
     played_at = Column(DateTime, default=datetime.utcnow)
+
+class SupportTicket(Base):
+    __tablename__ = 'support_tickets'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    username = Column(String)
+    message = Column(String)
+    status = Column(String, default='open')  # open, answered, closed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    answer = Column(String, nullable=True)
+    answered_at = Column(DateTime, nullable=True)
 
 # Создание таблиц
 Base.metadata.create_all(engine)
@@ -607,15 +622,172 @@ async def test_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
+async def send_to_admin(message: str):
+    """Отправляет сообщение админу"""
+    try:
+        await application.bot.send_message(chat_id=ADMIN_ID, text=message)
+    except Exception as e:
+        logging.error(f"Ошибка при отправке сообщения админу: {e}")
+
+async def admin_give_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ-команда для выдачи баланса пользователю"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды")
+        return
+
+    try:
+        # Формат команды: /give_balance user_id amount
+        args = context.args
+        if len(args) != 2:
+            await update.message.reply_text("❌ Использование: /give_balance user_id amount")
+            return
+
+        user_id = int(args[0])
+        amount = float(args[1])
+
+        session = Session()
+        user = session.query(User).filter_by(user_id=user_id).first()
+        
+        if not user:
+            await update.message.reply_text("❌ Пользователь не найден")
+            return
+
+        user.balance += amount
+        session.commit()
+
+        await update.message.reply_text(f"✅ Баланс пользователя {user.username} обновлен: {user.balance}")
+        await application.bot.send_message(
+            chat_id=user_id,
+            text=f"💰 Ваш баланс был изменен администратором на {amount}!\nТекущий баланс: {user.balance}"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+    finally:
+        session.close()
+
+async def admin_view_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ-команда для просмотра тикетов"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды")
+        return
+
+    session = Session()
+    try:
+        tickets = session.query(SupportTicket).filter_by(status='open').all()
+        if not tickets:
+            await update.message.reply_text("📫 Нет открытых тикетов")
+            return
+
+        for ticket in tickets:
+            await update.message.reply_text(
+                f"🎫 Тикет #{ticket.id}\n"
+                f"От: {ticket.username} (ID: {ticket.user_id})\n"
+                f"Сообщение: {ticket.message}\n"
+                f"Статус: {ticket.status}\n"
+                f"Создан: {ticket.created_at}\n\n"
+                f"Чтобы ответить используйте:\n"
+                f"/answer_ticket {ticket.id} ваш_ответ"
+            )
+    finally:
+        session.close()
+
+async def admin_answer_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ-команда для ответа на тикет"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды")
+        return
+
+    try:
+        # Формат команды: /answer_ticket ticket_id answer_text
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("❌ Использование: /answer_ticket ticket_id answer_text")
+            return
+
+        ticket_id = int(args[0])
+        answer = ' '.join(args[1:])
+
+        session = Session()
+        ticket = session.query(SupportTicket).filter_by(id=ticket_id).first()
+        
+        if not ticket:
+            await update.message.reply_text("❌ Тикет не найден")
+            return
+
+        ticket.status = 'answered'
+        ticket.answer = answer
+        ticket.answered_at = datetime.utcnow()
+        session.commit()
+
+        await update.message.reply_text(f"✅ Ответ на тикет #{ticket_id} отправлен")
+        await application.bot.send_message(
+            chat_id=ticket.user_id,
+            text=f"📬 Получен ответ на ваш тикет #{ticket.id}:\n\n"
+                 f"Ваш вопрос: {ticket.message}\n"
+                 f"Ответ: {answer}"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+    finally:
+        session.close()
+
+async def create_support_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание тикета в техподдержку"""
+    try:
+        message = ' '.join(context.args)
+        if not message:
+            await update.message.reply_text(
+                "❌ Пожалуйста, добавьте ваше сообщение после команды\n"
+                "Пример: /support У меня проблема с игрой"
+            )
+            return
+
+        session = Session()
+        ticket = SupportTicket(
+            user_id=update.effective_user.id,
+            username=update.effective_user.username,
+            message=message
+        )
+        session.add(ticket)
+        session.commit()
+
+        await update.message.reply_text(
+            f"✅ Ваш тикет #{ticket.id} создан!\n"
+            f"Мы ответим вам как можно скорее."
+        )
+
+        # Уведомляем админа
+        await send_to_admin(
+            f"📬 Новый тикет #{ticket.id}\n"
+            f"От: {ticket.username} (ID: {ticket.user_id})\n"
+            f"Сообщение: {message}"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при создании тикета: {str(e)}")
+    finally:
+        session.close()
+
 def main():
-    application = ApplicationBuilder().token(TOKEN).build()
+    global application
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("games", show_games_menu))
     application.add_handler(CommandHandler("profile", show_profile))
     application.add_handler(CommandHandler("help", blackjack_help))
-    application.add_handler(CommandHandler("test_db", test_db))  # Добавляем новый обработчик
+    application.add_handler(CommandHandler("test_db", test_db))
+    
+    # Админ команды
+    application.add_handler(CommandHandler("give_balance", admin_give_balance))
+    application.add_handler(CommandHandler("tickets", admin_view_tickets))
+    application.add_handler(CommandHandler("answer_ticket", admin_answer_ticket))
+    
+    # Команды техподдержки
+    application.add_handler(CommandHandler("support", create_support_ticket))
     
     # Добавляем обработчик кнопок
     application.add_handler(CallbackQueryHandler(button_callback))
