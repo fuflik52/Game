@@ -16,8 +16,12 @@ logging.basicConfig(
 
 # Подключение к базе данных
 DATABASE_URL = os.getenv('DATABASE_URL')
-if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set")
+    
+if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 Base = declarative_base()
