@@ -1,7 +1,12 @@
 import logging
+import os
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 import random
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, func
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(
@@ -9,56 +14,56 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# Подключение к базе данных
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+engine = create_engine(DATABASE_URL)
+Session = sessionmaker(bind=engine)
+Base = declarative_base()
+
+# Модели базы данных
+class User(Base):
+    __tablename__ = 'users'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, unique=True)
+    username = Column(String)
+    balance = Column(Float, default=5000)
+    rating = Column(Integer, default=0)
+    clan = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_active = Column(DateTime, default=datetime.utcnow)
+
+class GameLog(Base):
+    __tablename__ = 'game_logs'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    game_type = Column(String)
+    bet = Column(Float)
+    result = Column(String)
+    profit = Column(Float)
+    played_at = Column(DateTime, default=datetime.utcnow)
+
+# Создание таблиц
+Base.metadata.create_all(engine)
+
 # Токен бота
-TOKEN = "7819477296:AAGsHv9V8vfCAAw1aWrc_goeLzSdr3yW0Jg"
+TOKEN = os.getenv('BOT_TOKEN')
 
-# Временное хранилище данных пользователей
-users = {}
-
-class User:
-    def __init__(self, user_id, username):
-        self.user_id = user_id
-        self.username = username
-        self.balance = 5000
-        self.rating = 0
-        self.clan = None
-        self.current_game = None
-        self.game_data = {}
-
-class BlackjackGame:
-    def __init__(self):
-        self.deck = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'Валет', 'Дама', 'Король', 'Туз'] * 4
-        self.suits = ['♠️', '♣️', '♥️', '♦']
-        self.card_values = {
-            '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
-            'Валет': 10, 'Дама': 10, 'Король': 10, 'Туз': 11
-        }
-
-    def get_card(self):
-        card = random.choice(self.deck)
-        suit = random.choice(self.suits)
-        return card, suit
-
-    def calculate_score(self, cards):
-        score = 0
-        aces = 0
-        for card, _ in cards:
-            if card == 'Туз':
-                aces += 1
-            else:
-                score += self.card_values[card]
-        
-        for _ in range(aces):
-            if score + 11 <= 21:
-                score += 11
-            else:
-                score += 1
-        return score
+def get_or_create_user(session, user_id, username):
+    user = session.query(User).filter_by(user_id=user_id).first()
+    if not user:
+        user = User(user_id=user_id, username=username)
+        session.add(user)
+        session.commit()
+    return user
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id not in users:
-        users[user.id] = User(user.id, user.username)
+    session = Session()
+    user = get_or_create_user(session, update.effective_user.id, update.effective_user.username)
+    session.close()
 
     keyboard = [
         ["💎 Основное", "🚀 Игры"],
@@ -68,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        f"👋 Привет, {user.first_name}!\n"
+        f"👋 Привет, {update.effective_user.first_name}!\n"
         "Я - твой новый игровой друг.\n\n"
         "🎉 Здесь тебя ждёт море веселья и множество игр, чтобы каждый твой день был ярче! 🥰\n\n"
         "🚀 Готов отправиться в увлекательное приключение? Просто выбери действие ниже и вперёд! 👇",
@@ -103,9 +108,9 @@ async def show_blackjack_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def show_bet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = users.get(update.callback_query.from_user.id)
-    if not user:
-        return
+    session = Session()
+    user = get_or_create_user(session, update.callback_query.from_user.id, update.callback_query.from_user.username)
+    session.close()
     
     one_third = user.balance // 3
     two_thirds = (user.balance * 2) // 3
@@ -128,21 +133,24 @@ async def show_bet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_blackjack(update: Update, user, game, player_score):
     if player_score == 21:
-        bet = user.game_data['blackjack']['bet']
+        session = Session()
+        bet = user.balance
         win_amount = bet * 2  # Выигрыш х2 при 21 очке
         user.balance += win_amount
+        session.commit()
+        session.close()
         
         # Формируем текст для карт
         player_cards_text = "🎫 Ваши карты:\n"
-        for i, (card, suit) in enumerate(user.game_data['blackjack']['player_cards'], 1):
+        for i, (card, suit) in enumerate(game.player_cards, 1):
             player_cards_text += f"⠀{i}⃣ {suit} {card}\n"
         
         dealer_cards_text = "🎟 Карты крупье:\n"
-        dealer_card, dealer_suit = user.game_data['blackjack']['dealer_cards'][0]
+        dealer_card, dealer_suit = game.dealer_cards[0]
         dealer_cards_text += f"⠀1⃣ {dealer_suit} {dealer_card}"
         
         game_text = (
-            f"💡 Ваши очки: {player_score} ⏐ Крупье: {game.calculate_score(user.game_data['blackjack']['dealer_cards'])}\n"
+            f"💡 Ваши очки: {player_score} ⏐ Крупье: {game.calculate_score(game.dealer_cards)}\n"
             f"{player_cards_text}\n"
             f"{dealer_cards_text}\n"
             f"🌟 Блэкджек! Вы выиграли {win_amount}$!\n"
@@ -157,44 +165,82 @@ async def check_blackjack(update: Update, user, game, player_score):
         else:
             await update.message.reply_text(game_text, reply_markup=reply_markup)
             
-        user.game_data.pop('blackjack')
         return True
     return False
 
+class BlackjackGame:
+    def __init__(self):
+        self.deck = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'Валет', 'Дама', 'Король', 'Туз'] * 4
+        self.suits = ['♠️', '♣️', '♥️', '♦']
+        self.card_values = {
+            '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
+            'Валет': 10, 'Дама': 10, 'Король': 10, 'Туз': 11
+        }
+        self.player_cards = []
+        self.dealer_cards = []
+
+    def get_card(self):
+        card = random.choice(self.deck)
+        suit = random.choice(self.suits)
+        return card, suit
+
+    def calculate_score(self, cards):
+        score = 0
+        aces = 0
+        for card, _ in cards:
+            if card == 'Туз':
+                aces += 1
+            else:
+                score += self.card_values[card]
+        
+        for _ in range(aces):
+            if score + 11 <= 21:
+                score += 11
+            else:
+                score += 1
+        return score
+
 async def start_blackjack_game(update: Update, context: ContextTypes.DEFAULT_TYPE, bet: int):
     query = update.callback_query
-    user = users.get(query.from_user.id)
-    if not user:
-        return
+    session = Session()
+    user = get_or_create_user(session, query.from_user.id, query.from_user.username)
+    session.close()
     
     if bet > user.balance:
         await query.message.reply_text("Недостаточно средств!")
         return
     
     user.balance -= bet
-    game = BlackjackGame()
-    user.game_data['blackjack'] = {
-        'game': game,
-        'bet': bet,
-        'player_cards': [game.get_card(), game.get_card()],
-        'dealer_cards': [game.get_card()]
-    }
+    session = Session()
+    session.add(GameLog(user_id=user.user_id, game_type='blackjack', bet=bet, result='in_progress'))
+    session.commit()
+    session.close()
     
-    player_score = game.calculate_score(user.game_data['blackjack']['player_cards'])
-    dealer_score = game.calculate_score(user.game_data['blackjack']['dealer_cards'])
+    game = BlackjackGame()
+    game.player_cards = [game.get_card(), game.get_card()]
+    game.dealer_cards = [game.get_card()]
+    
+    player_score = game.calculate_score(game.player_cards)
+    dealer_score = game.calculate_score(game.dealer_cards)
     
     # Проверяем на блэкджек
     if await check_blackjack(update, user, game, player_score):
+        session = Session()
+        game_log = session.query(GameLog).filter_by(user_id=user.user_id, result='in_progress').first()
+        game_log.result = 'win'
+        game_log.profit = bet * 2
+        session.commit()
+        session.close()
         return
     
     # Формируем текст для карт игрока
     player_cards_text = "🎫 Ваши карты:\n"
-    for i, (card, suit) in enumerate(user.game_data['blackjack']['player_cards'], 1):
+    for i, (card, suit) in enumerate(game.player_cards, 1):
         player_cards_text += f"⠀{i}⃣ {suit} {card}\n"
     
     # Формируем текст для карт крупье
     dealer_cards_text = "🎟 Карты крупье:\n"
-    dealer_card, dealer_suit = user.game_data['blackjack']['dealer_cards'][0]
+    dealer_card, dealer_suit = game.dealer_cards[0]
     dealer_cards_text += f"⠀1⃣ {dealer_suit} {dealer_card}"
     
     game_text = (
@@ -257,30 +303,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_blackjack_game(update, context, bet)
     elif query.data == "blackjack_hit":
         # Добавить карту игроку
-        user = users.get(query.from_user.id)
-        if not user or 'blackjack' not in user.game_data:
-            return
+        session = Session()
+        user = get_or_create_user(session, query.from_user.id, query.from_user.username)
+        session.close()
         
-        game = user.game_data['blackjack']['game']
-        user.game_data['blackjack']['player_cards'].append(game.get_card())
-        player_score = game.calculate_score(user.game_data['blackjack']['player_cards'])
+        game = BlackjackGame()
+        game.player_cards = [game.get_card(), game.get_card()]
+        game.dealer_cards = [game.get_card()]
+        
+        game.player_cards.append(game.get_card())
+        player_score = game.calculate_score(game.player_cards)
         
         # Проверяем на блэкджек
         if await check_blackjack(update, user, game, player_score):
+            session = Session()
+            game_log = session.query(GameLog).filter_by(user_id=user.user_id, result='in_progress').first()
+            game_log.result = 'win'
+            game_log.profit = user.balance * 2
+            session.commit()
+            session.close()
             return
         
         if player_score > 21:
             # Проигрыш
+            session = Session()
+            game_log = session.query(GameLog).filter_by(user_id=user.user_id, result='in_progress').first()
+            game_log.result = 'lose'
+            session.commit()
+            session.close()
+            
             player_cards_text = "🎫 Ваши карты:\n"
-            for i, (card, suit) in enumerate(user.game_data['blackjack']['player_cards'], 1):
+            for i, (card, suit) in enumerate(game.player_cards, 1):
                 player_cards_text += f"⠀{i}⃣ {suit} {card}\n"
             
             dealer_cards_text = "🎟 Карты крупье:\n"
-            dealer_card, dealer_suit = user.game_data['blackjack']['dealer_cards'][0]
+            dealer_card, dealer_suit = game.dealer_cards[0]
             dealer_cards_text += f"⠀1⃣ {dealer_suit} {dealer_card}"
             
             game_text = (
-                f"💡 Ваши очки: {player_score} ⏐ Крупье: {game.calculate_score(user.game_data['blackjack']['dealer_cards'])}\n"
+                f"💡 Ваши очки: {player_score} ⏐ Крупье: {game.calculate_score(game.dealer_cards)}\n"
                 f"{player_cards_text}\n"
                 f"{dealer_cards_text}\n"
                 f"❌ Вы проиграли!\n"
@@ -290,19 +351,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("🔄 Играть заново", callback_data="blackjack_start")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.message.reply_text(game_text, reply_markup=reply_markup)
-            user.game_data.pop('blackjack')
         else:
             # Продолжаем игру
             player_cards_text = "🎫 Ваши карты:\n"
-            for i, (card, suit) in enumerate(user.game_data['blackjack']['player_cards'], 1):
+            for i, (card, suit) in enumerate(game.player_cards, 1):
                 player_cards_text += f"⠀{i}⃣ {suit} {card}\n"
             
             dealer_cards_text = "🎟 Карты крупье:\n"
-            dealer_card, dealer_suit = user.game_data['blackjack']['dealer_cards'][0]
+            dealer_card, dealer_suit = game.dealer_cards[0]
             dealer_cards_text += f"⠀1⃣ {dealer_suit} {dealer_card}"
             
             game_text = (
-                f"Игрок, Ваши очки: {player_score} ⏐ Крупье: {game.calculate_score(user.game_data['blackjack']['dealer_cards'])}\n"
+                f"Игрок, Ваши очки: {player_score} ⏐ Крупье: {game.calculate_score(game.dealer_cards)}\n"
                 f"{player_cards_text}\n"
                 f"{dealer_cards_text}\n"
                 f"💰 Баланс: {user.balance}$"
@@ -322,42 +382,56 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == "blackjack_stand":
         # Игрок останавливается, дилер показывает карты
-        user = users.get(query.from_user.id)
-        if not user or 'blackjack' not in user.game_data:
-            return
+        session = Session()
+        user = get_or_create_user(session, query.from_user.id, query.from_user.username)
+        session.close()
         
-        game = user.game_data['blackjack']['game']
-        dealer_score = game.calculate_score(user.game_data['blackjack']['dealer_cards'])
+        game = BlackjackGame()
+        game.player_cards = [game.get_card(), game.get_card()]
+        game.dealer_cards = [game.get_card()]
+        
+        dealer_score = game.calculate_score(game.dealer_cards)
         
         # Дилер берет карты, пока у него меньше 17
         while dealer_score < 17:
-            user.game_data['blackjack']['dealer_cards'].append(game.get_card())
-            dealer_score = game.calculate_score(user.game_data['blackjack']['dealer_cards'])
+            game.dealer_cards.append(game.get_card())
+            dealer_score = game.calculate_score(game.dealer_cards)
         
-        player_score = game.calculate_score(user.game_data['blackjack']['player_cards'])
-        bet = user.game_data['blackjack']['bet']
+        player_score = game.calculate_score(game.player_cards)
         
         # Формируем текст для карт
         player_cards_text = "🎫 Ваши карты:\n"
-        for i, (card, suit) in enumerate(user.game_data['blackjack']['player_cards'], 1):
+        for i, (card, suit) in enumerate(game.player_cards, 1):
             player_cards_text += f"⠀{i}⃣ {suit} {card}\n"
         
         dealer_cards_text = "🎟 Карты крупье:\n"
-        for i, (card, suit) in enumerate(user.game_data['blackjack']['dealer_cards'], 1):
+        for i, (card, suit) in enumerate(game.dealer_cards, 1):
             dealer_cards_text += f"⠀{i}⃣ {suit} {card}\n"
         
         # Определяем победителя
+        session = Session()
+        game_log = session.query(GameLog).filter_by(user_id=user.user_id, result='in_progress').first()
         if dealer_score > 21 or player_score > dealer_score:
             # Игрок выиграл
-            win_amount = bet * 2
+            win_amount = user.balance * 2
             user.balance += win_amount
+            game_log.result = 'win'
+            game_log.profit = win_amount
+            session.commit()
+            session.close()
             result_text = f"✅ Вы выиграли {win_amount}$!"
         elif player_score < dealer_score:
             # Игрок проиграл
-            result_text = f"❌ Вы проиграли {bet}$!"
+            game_log.result = 'lose'
+            session.commit()
+            session.close()
+            result_text = f"❌ Вы проиграли {user.balance}$!"
         else:
             # Ничья
-            user.balance += bet
+            user.balance += user.balance
+            game_log.result = 'draw'
+            session.commit()
+            session.close()
             result_text = "🤝 Ничья! Ставка возвращена."
         
         game_text = (
@@ -371,55 +445,76 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔄 Играть заново", callback_data="blackjack_start")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text(game_text, reply_markup=reply_markup)
-        user.game_data.pop('blackjack')
     
     elif query.data == "blackjack_double":
         # Удвоить ставку и взять одну карту
-        user = users.get(query.from_user.id)
-        if not user or 'blackjack' not in user.game_data:
-            return
+        session = Session()
+        user = get_or_create_user(session, query.from_user.id, query.from_user.username)
+        session.close()
         
-        bet = user.game_data['blackjack']['bet']
+        bet = user.balance
         if user.balance < bet:  # Проверяем, хватает ли денег на удвоение
             await query.message.reply_text("Недостаточно средств для удвоения!")
             return
         
         # Удваиваем ставку
         user.balance -= bet
-        user.game_data['blackjack']['bet'] = bet * 2
+        session = Session()
+        game_log = session.query(GameLog).filter_by(user_id=user.user_id, result='in_progress').first()
+        game_log.bet = bet * 2
+        session.commit()
+        session.close()
         
         # Берем одну карту
-        game = user.game_data['blackjack']['game']
-        user.game_data['blackjack']['player_cards'].append(game.get_card())
-        player_score = game.calculate_score(user.game_data['blackjack']['player_cards'])
+        game = BlackjackGame()
+        game.player_cards = [game.get_card(), game.get_card()]
+        game.dealer_cards = [game.get_card()]
+        
+        game.player_cards.append(game.get_card())
+        player_score = game.calculate_score(game.player_cards)
         
         # Сразу показываем карты дилера и определяем победителя
-        dealer_score = game.calculate_score(user.game_data['blackjack']['dealer_cards'])
+        dealer_score = game.calculate_score(game.dealer_cards)
         while dealer_score < 17:
-            user.game_data['blackjack']['dealer_cards'].append(game.get_card())
-            dealer_score = game.calculate_score(user.game_data['blackjack']['dealer_cards'])
+            game.dealer_cards.append(game.get_card())
+            dealer_score = game.calculate_score(game.dealer_cards)
         
         # Формируем текст для карт
         player_cards_text = "🎫 Ваши карты:\n"
-        for i, (card, suit) in enumerate(user.game_data['blackjack']['player_cards'], 1):
+        for i, (card, suit) in enumerate(game.player_cards, 1):
             player_cards_text += f"⠀{i}⃣ {suit} {card}\n"
         
         dealer_cards_text = "🎟 Карты крупье:\n"
-        for i, (card, suit) in enumerate(user.game_data['blackjack']['dealer_cards'], 1):
+        for i, (card, suit) in enumerate(game.dealer_cards, 1):
             dealer_cards_text += f"⠀{i}⃣ {suit} {card}\n"
         
         # Определяем победителя
         doubled_bet = bet * 2
+        session = Session()
+        game_log = session.query(GameLog).filter_by(user_id=user.user_id, result='in_progress').first()
         if player_score > 21:
+            game_log.result = 'lose'
+            session.commit()
+            session.close()
             result_text = f"❌ Вы проиграли {doubled_bet}$!"
         elif dealer_score > 21 or player_score > dealer_score:
             win_amount = doubled_bet * 2
             user.balance += win_amount
+            game_log.result = 'win'
+            game_log.profit = win_amount
+            session.commit()
+            session.close()
             result_text = f"✅ Вы выиграли {win_amount}$!"
         elif player_score < dealer_score:
+            game_log.result = 'lose'
+            session.commit()
+            session.close()
             result_text = f"❌ Вы проиграли {doubled_bet}$!"
         else:
             user.balance += doubled_bet
+            game_log.result = 'draw'
+            session.commit()
+            session.close()
             result_text = "🤝 Ничья! Ставка возвращена."
         
         game_text = (
@@ -433,7 +528,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔄 Играть заново", callback_data="blackjack_start")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text(game_text, reply_markup=reply_markup)
-        user.game_data.pop('blackjack')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
@@ -452,6 +546,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_profile(update, context)
     elif text == "◀️ в главное меню":
         await start(update, context)
+
+async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = Session()
+    user = get_or_create_user(session, update.effective_user.id, update.effective_user.username)
+    
+    # Получаем статистику игр
+    games_played = session.query(func.count(GameLog.id)).filter_by(user_id=user.user_id).scalar()
+    total_profit = session.query(func.sum(GameLog.profit)).filter_by(user_id=user.user_id).scalar() or 0
+    
+    profile_text = (
+        f"👤 Профиль игрока\n\n"
+        f"🆔 ID: {user.user_id}\n"
+        f"👤 Имя: {update.effective_user.first_name}\n"
+        f"💰 Баланс: {user.balance}$\n"
+        f"🏆 Рейтинг: {user.rating}\n"
+        f"🎮 Игр сыграно: {games_played}\n"
+        f"💵 Общий профит: {total_profit}$\n"
+        f"📅 Дата регистрации: {user.created_at.strftime('%d.%m.%Y')}"
+    )
+    
+    session.close()
+    await update.message.reply_text(profile_text)
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
