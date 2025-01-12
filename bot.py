@@ -572,30 +572,35 @@ async def test_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Создаем сессию
         session = Session()
         
-        # Пробуем создать тестового пользователя
-        test_user = User(
-            user_id=update.effective_user.id,
-            username=update.effective_user.username or "Unknown",
-            balance=5000.0
-        )
-        
-        # Добавляем пользователя в базу
-        session.add(test_user)
-        session.commit()
-        
-        # Проверяем, что пользователь создался
+        # Проверяем, существует ли пользователь
         user = session.query(User).filter_by(user_id=update.effective_user.id).first()
         
         if user:
             await update.message.reply_text(
                 f"✅ База данных работает!\n\n"
-                f"Создан тестовый пользователь:\n"
+                f"Найден существующий пользователь:\n"
                 f"ID: {user.user_id}\n"
                 f"Имя: {user.username}\n"
-                f"Баланс: {user.balance}"
+                f"Баланс: {user.balance}\n"
+                f"Создан: {user.created_at}"
             )
         else:
-            await update.message.reply_text("❌ Ошибка: Не удалось найти созданного пользователя")
+            # Создаем нового пользователя
+            test_user = User(
+                user_id=update.effective_user.id,
+                username=update.effective_user.username or "Unknown",
+                balance=5000.0
+            )
+            session.add(test_user)
+            session.commit()
+            
+            await update.message.reply_text(
+                f"✅ База данных работает!\n\n"
+                f"Создан новый пользователь:\n"
+                f"ID: {test_user.user_id}\n"
+                f"Имя: {test_user.username}\n"
+                f"Баланс: {test_user.balance}"
+            )
             
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при работе с базой данных: {str(e)}")
